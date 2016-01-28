@@ -2,10 +2,10 @@ const { Component, createElement } = require('react')
 const storeShape = require('../utils/storeShape')
 const shallowEqual = require('../utils/shallowEqual')
 const isPlainObject = require('../utils/isPlainObject')
+const componentLevelState = require('../utils/componentLevelState')
 const wrapActionCreators = require('../utils/wrapActionCreators')
 const hoistStatics = require('hoist-non-react-statics')
 const invariant = require('invariant')
-
 const defaultMapStateToProps = state => ({}) // eslint-disable-line no-unused-vars
 const defaultMapDispatchToProps = dispatch => ({ dispatch })
 const defaultMergeProps = (stateProps, dispatchProps, parentProps) => ({
@@ -14,6 +14,9 @@ const defaultMergeProps = (stateProps, dispatchProps, parentProps) => ({
   ...dispatchProps
 })
 
+
+const componentLevelStatePropName = "state"
+
 function getDisplayName(WrappedComponent) {
   return WrappedComponent.displayName || WrappedComponent.name || 'Component'
 }
@@ -21,7 +24,7 @@ function getDisplayName(WrappedComponent) {
 // Helps track hot reloading.
 let nextVersion = 0
 
-function connect(mapStateToProps, mapDispatchToProps, mergeProps, options = {}) {
+function connect(mapStateToProps, mapDispatchToProps, mergeProps, componentReducer, options = {}) {
   const shouldSubscribe = Boolean(mapStateToProps)
   const finalMapStateToProps = mapStateToProps || defaultMapStateToProps
   const finalMapDispatchToProps = isPlainObject(mapDispatchToProps) ?
@@ -35,7 +38,7 @@ function connect(mapStateToProps, mapDispatchToProps, mergeProps, options = {}) 
   // Helps track hot reloading.
   const version = nextVersion++
 
-  function computeStateProps(store, props) {
+  function computeStateProps(store, props, componentId) {
     const state = store.getState()
     const stateProps = doStatePropsDependOnOwnProps ?
       finalMapStateToProps(state, props) :
@@ -46,6 +49,19 @@ function connect(mapStateToProps, mapDispatchToProps, mergeProps, options = {}) 
       '`mapStateToProps` must return an object. Instead received %s.',
       stateProps
     )
+
+    if(componentReducer) {
+      console.log("State Props", stateProps)
+      invariant(
+        !!!stateProps[componentLevelStatePropName],
+        `\`${componentLevelStatePropName}\' is an illegal identifier in \`mapStateToProps\` when using component level state.`
+      );
+
+      // Grab the components state and insert it in as a 
+      // prop under the `componentLevelStatePropName` name.
+      stateProps[componentLevelStatePropName] = componentLevelState.selectComponentState(state, componentId)
+    }
+
     return stateProps
   }
 
@@ -73,6 +89,11 @@ function connect(mapStateToProps, mapDispatchToProps, mergeProps, options = {}) 
     return mergedProps
   }
 
+  // Weak component Id generation. 
+  // WARNING: NON DETERMINISTIC. The ID for a component should be determined
+  // by the state so time travel and etc work appropriately.
+  let __componentIds = 0;
+
   return function wrapWithConnect(WrappedComponent) {
     class Connect extends Component {
       shouldComponentUpdate() {
@@ -91,19 +112,32 @@ function connect(mapStateToProps, mapDispatchToProps, mergeProps, options = {}) 
           `or explicitly pass "store" as a prop to "${this.constructor.displayName}".`
         )
 
+        if(componentReducer) {
+          // Mount the reducer for this component
+          componentLevelState.mountReducer(this.getId(), componentReducer)
+
+          // Compute the component state
+          this.store.dispatch({ type: 'UPDATE_COMPONENT_STATE' });
+        }
+
         const storeState = this.store.getState()
         this.state = { storeState }
         this.clearCache()
       }
 
       updateStatePropsIfNeeded() {
-        const nextStateProps = computeStateProps(this.store, this.props)
+        const nextStateProps = computeStateProps(this.store, this.props, this.getId())
         if (this.stateProps && shallowEqual(nextStateProps, this.stateProps)) {
           return false
         }
 
         this.stateProps = nextStateProps
         return true
+      }
+
+      // Return the component id
+      getId() {
+        return this.__id || (this.__id = `component-${getDisplayName(WrappedComponent)}-${__componentIds++}`);
       }
 
       updateDispatchPropsIfNeeded() {
@@ -132,6 +166,9 @@ function connect(mapStateToProps, mapDispatchToProps, mergeProps, options = {}) 
         if (shouldSubscribe && !this.unsubscribe) {
           this.unsubscribe = this.store.subscribe(::this.handleChange)
           this.handleChange()
+
+          // Mount the component level reducer
+          if(componentReducer) componentLevelState.mountReducer(this.getId(), componentReducer)
         }
       }
 
@@ -139,6 +176,8 @@ function connect(mapStateToProps, mapDispatchToProps, mergeProps, options = {}) 
         if (this.unsubscribe) {
           this.unsubscribe()
           this.unsubscribe = null
+
+          if(componentReducer) componentLevelState.unmountReducer(this.getId())
         }
       }
 
